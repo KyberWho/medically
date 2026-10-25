@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { getEnv } from './utilities.js';
+import { getEnv } from '../api/utilities.js';
 
 const fallbackDirectory = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '.data');
 const fallbackReferralsFile = path.join(fallbackDirectory, 'referrals.json');

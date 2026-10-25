@@ -53,46 +53,11 @@ existing patient records.
 Run `Scripts/setup.bat` from the `Scripts` directory to use the existing
 Windows setup flow.
 
-## Decoupled frontend and API deployment
-
-The API and the demo websites can be run as separate services. The API exposes
-JSON endpoints such as `/api/patients`, `/api/referrals`, and
-`/api/process-file`, while the browser UI can live on a different origin.
-
-To disable the built-in static site hosting and run only the API:
-
-```env
-SERVE_FRONTEND=false
-PORT=3000
-CORS_ALLOWED_ORIGINS=https://app.example.com,https://imaging.example.com
-```
-
-Then start the API server with:
-
-```sh
-node api/server.js
-```
-
-On the frontend, point the browser at the API origin explicitly:
-
-```html
-<script>
-  window.API_BASE_URL = "https://api.example.com";
-</script>
-```
-
-The demo JavaScript already reads `window.API_BASE_URL`, a query param such as
-`?apiBaseUrl=https://api.example.com`, or falls back to the current origin when
-running locally.
-
-For a full split deployment, host:
-
-- `https://app.example.com` -> the website frontend
-- `https://api.example.com` -> the Medically API
-
-The frontend calls the API over HTTP, while the API does the AI verification and
-database work. This keeps the AI logic in one backend and lets multiple websites,
-apps, or devices consume the same service.
+From the project root, run `npm start` to start both servers. The app and its
+patient/referral APIs are available at `http://localhost:3000`; the
+`POST /api/process-file` endpoint is available at `http://localhost:3030`.
+Use `npm stop` to stop both servers. To run them separately, use
+`npm run start:web` and `npm run start:process`.
 
 ## Shared deployment for multiple devices
 
@@ -104,7 +69,9 @@ user's laptop. The backend reads the model endpoint from `OLLAMA_HOST`.
 
    ```env
    DEV_MODE=false
-   PORT=3000
+   API_PORT=3030
+   WEB_PORT=3000
+   NHS_SERVER_URL=http://10.0.0.12:3000
    OLLAMA_HOST=http://10.0.0.12:11434
    ```
 
@@ -119,13 +86,165 @@ user's laptop. The backend reads the model endpoint from `OLLAMA_HOST`.
 4. Start the API on that server:
 
    ```sh
-   node api/server.js
+   npm start
    ```
 
-5. Everyone else should open the app through that server URL, for example:
+   This starts two servers: the Imaging Desk/CRIS website and its data APIs
+   on port `3000`, and the referral processing API on port `3030`. The
+   process API forwards verified referrals to the NHS server's
+   `POST /api/referrals/receive` endpoint, where they are saved to the
+   database and CRIS worklist. Set `WEB_PORT` or `API_PORT` to change the
+   ports.
+
+5. Everyone else should open the app through the web server, for example:
 
    ```text
-   http://10.0.0.12:3000/imaging-desk
+   http://10.0.0.12:3000/imaging-desk?apiBaseUrl=http://10.0.0.12:3030
    ```
 
 This means one AI service handles all referrals, so no one has to install Ollama on their own device.
+For a non-local deployment, set `WEB_ORIGIN` in `.env` to the web server
+origin (for example, `http://10.0.0.12:3000`) so the process API permits
+requests from the app.
+
+To run only one server, use `npm run start:web` for the app and its patient /
+referral APIs and the receiving endpoint, or `npm run start:process` for
+`POST /api/process-file`.
+Run `npm stop` to stop both servers.
+
+## API reference
+
+### POST /api/process-file
+
+The only endpoint needed to integrate existing systems with the medically 
+validation checker is the /api/process-file POST request.
+
+Processes a referral payload, validates that the referral is clinically
+consistent with the booking and consultation notes, then forwards the 
+request .
+
+This endpoint accepts either:
+
+- a multipart upload with a form field named `file` that contains JSON, or
+- a raw JSON request body sent with `Content-Type: application/json`.
+
+The JSON payload is expected to include the same structure used by the Imaging
+Desk front end, typically with these top-level sections:
+
+```json
+{
+  "referralId": "IMG-123",
+  "exportedAt": "2026-10-25T09:00:00.000Z",
+  "patient": {
+    "name": "Jane Doe",
+    "nhsNumber": "1234567890",
+    "dob": "1984-06-15",
+    "address": "12 Example Street",
+    "gender": "Female",
+    "mobilePhone": "07700 900123"
+  },
+  "referrer": {
+    "user": "Dr Smith",
+    "contactNo": "020 7946 0958",
+    "requestingClinician": "Dr Smith",
+    "location": "Hillview Surgery",
+    "category": "General practice"
+  },
+  "referral": {
+    "hospitalDepartment": "Orthopaedics",
+    "modality": "X-ray",
+    "area": "Left wrist",
+    "clinicalDetails": "Pain and swelling after a fall on outstretched hand.",
+    "severity": "Urgent"
+  },
+  "booking": {
+    "appointmentDate": "2026-10-29",
+    "appointmentTime": "09:15",
+    "appointmentType": "Face-to-face",
+    "location": "Main clinic",
+    "clinician": "Dr Jones",
+    "status": "Booked",
+    "reason": "Left wrist pain and swelling after FOOSH"
+  },
+  "consultation": {
+    "presentingComplaint": "Left wrist pain",
+    "history": "Patient fell while walking and landed on the left hand.",
+    "examination": "Swollen left wrist with reduced range of movement.",
+    "assessment": "Probable wrist sprain",
+    "plan": "Arrange wrist X-ray",
+    "additionalNotes": "Pain is worse with movement."
+  }
+}
+```
+
+Mandatory clinical checks performed by this endpoint:
+
+- `referral.area` and `referral.clinicalDetails` are compared with the booking
+  reason and consultation notes.
+- If the model decides the referral is clinically inconsistent, the request is
+  rejected with a `406` response rather than saved to the database.
+
+Required fields for a valid submission:
+
+- `referral.area`
+- `referral.clinicalDetails`
+- `booking.reason`
+- `consultation.presentingComplaint`
+
+#### Example cURL
+
+Upload a JSON file:
+
+```sh
+curl -X POST http://localhost:3030/api/process-file \
+  -F "file=@referral.json"
+```
+
+Send raw JSON directly:
+
+```sh
+curl -X POST http://localhost:3030/api/process-file \
+  -H "Content-Type: application/json" \
+  --data @referral.json
+```
+
+#### Success response
+
+```json
+{
+  "success": true,
+  "message": "Referral added to the CRIS worklist.",
+  "referralId": "IMG-123",
+  "referralRecordId": 42,
+  "request": {
+    "id": "IMG-123",
+    "status": "New",
+    "receivedAt": "2026-10-25T09:00:00.000Z",
+    "patient": { "name": "Jane Doe" },
+    "referrer": { "user": "Dr Smith" },
+    "referral": {
+      "hospitalDepartment": "Orthopaedics",
+      "modality": "X-ray",
+      "area": "Left wrist",
+      "clinicalDetails": "Pain and swelling after a fall on outstretched hand.",
+      "severity": "Urgent"
+    }
+  }
+}
+```
+
+#### Error responses
+
+- `400 Bad Request` when the upload is missing, empty, or not valid JSON.
+- `406 Not Acceptable` when the referral fails the clinical verification step.
+- `500 Internal Server Error` for other server-side storage or processing errors.
+
+Example validation rejection:
+
+```json
+{
+  "success": false,
+  "error": "Referral notes are not suitable.",
+  "message": "• Left wrist pain does not match the booking reason for chest pain."
+}
+```

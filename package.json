@@ -4,7 +4,9 @@
 	"description": "",
 	"main": "index.js",
 	"scripts": {
-		"start": "node api/server.js",
+		"start": "node scripts/start.js",
+		"start:process": "node api/server.js",
+		"start:web": "node nhs-server/server.js",
 		"stop": "node api/stop-server.js",
 		"test": "echo \"Error: no test specified\" && exit 1"
 	},

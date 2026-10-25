@@ -7,9 +7,7 @@ const apiBaseUrl = (() => {
 		new URLSearchParams(window.location.search).get("api");
 	if (explicit) return explicit.replace(/\/$/, "");
 	if (["localhost", "127.0.0.1"].includes(window.location.hostname)) {
-		if (window.location.port && window.location.port !== "3000")
-			return "http://localhost:3000";
-		return window.location.origin;
+		return "http://localhost:3030";
 	}
 	return window.location.origin;
 })();
