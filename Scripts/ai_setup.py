@@ -89,21 +89,21 @@ def pull_model(model_name = MODEL_NAME):
 
 
 def pull_and_install_ollama():
-	try:
-		install_ollama()
-		pull_model("qwen3:1.7b")
-		pull_model("d3:latest")
-		print("Ollama's local API is available at http://localhost:11434.")
-	except subprocess.CalledProcessError as error:
-		raise SystemExit(
-			f"Ollama installation failed with exit code {error.returncode}."
-		) from error
-	except URLError as error:
-		raise SystemExit(f"Could not download the Ollama installer: {error}") from error
-	except OSError as error:
-		raise SystemExit(f"Ollama setup failed: {error}") from error
-	except RuntimeError as error:
-		raise SystemExit(f"Ollama setup failed: {error}") from error
+    try:
+        install_ollama()
+        pull_model("qwen3:1.7b")
+        pull_model("d3:2b")
+        print("Ollama's local API is available at http://localhost:11434.")
+    except subprocess.CalledProcessError as error:
+        raise SystemExit(
+            f"Ollama installation failed with exit code {error.returncode}."
+        ) from error
+    except URLError as error:
+        raise SystemExit(f"Could not download the Ollama installer: {error}") from error
+    except OSError as error:
+        raise SystemExit(f"Ollama setup failed: {error}") from error
+    except RuntimeError as error:
+        raise SystemExit(f"Ollama setup failed: {error}") from error
 
 
 if __name__ == "__main__":

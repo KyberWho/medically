@@ -1,13 +1,26 @@
 import cors from "cors";
 import { randomUUID } from "node:crypto";
-import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { mkdirSync, renameSync } from "node:fs";
+import {
+	existsSync,
+	mkdirSync,
+	readFileSync,
+	renameSync,
+	rmSync,
+	writeFileSync,
+} from "node:fs";
 import express from "express";
 import multer from "multer";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { getEnv, getEnvBool, isDevMode } from "./utilities.js";
+import {
+	closeDatabase,
+	getPatients,
+	getReferrals,
+	savePatient,
+	saveReferral,
+} from "./database.js";
+import { isDevMode } from "./utilities.js";
 import { Verify } from "./verify.js";
 
 const app = express();
@@ -33,7 +46,7 @@ const requestStoreFile = path.resolve(
 app.use(express.json());
 
 app.use(
-    cors({
+	cors({
 		origin: (origin, callback) => {
 			const allowedOrigins = new Set([
 				"http://localhost:3000",
@@ -47,11 +60,17 @@ app.use(
 				"http://localhost:8080",
 				"http://127.0.0.1:8080",
 			]);
-			if (!origin || allowedOrigins.has(origin))
+			if (!origin || allowedOrigins.has(origin)) {
 				callback(null, true);
-			else if (/^https?:\/\/(localhost|127\.0\.0\.1):(3000|5500|5173|4173|8080)$/.test(origin))
+			} else if (
+				/^https?:\/\/(localhost|127\.0\.0\.1):(3000|5500|5173|4173|8080)$/.test(
+					origin,
+				)
+			) {
 				callback(null, true);
-			else callback(new Error("Origin not allowed by CORS"));
+			} else {
+				callback(new Error("Origin not allowed by CORS"));
+			}
 		},
 		methods: ["POST", "GET", "OPTIONS"],
 		allowedHeaders: ["Content-Type", "x-api-key"],
@@ -113,6 +132,88 @@ function toCrisRequest(data) {
 
 const upload = multer({ storage: multer.memoryStorage() });
 
+app.get("/api/patients", async (req, res) => {
+	try {
+		res.json(await getPatients());
+	} catch (error) {
+		console.error("Could not retrieve patients:", error);
+		res.status(500).json({ error: "Could not retrieve patients." });
+	}
+});
+
+app.post("/api/patients", async (req, res) => {
+	const patient = req.body;
+	if (
+		!patient ||
+		typeof patient.name !== "string" ||
+		!patient.name.trim() ||
+		typeof patient.nhsNumber !== "string" ||
+		!/^\d{10}$/.test(patient.nhsNumber.replace(/\s/g, "")) ||
+		typeof patient.dob !== "string" ||
+		(patient.dob && !/^\d{4}-\d{2}-\d{2}$/.test(patient.dob)) ||
+		typeof patient.address !== "string" ||
+		typeof patient.gender !== "string" ||
+		typeof patient.mobilePhone !== "string"
+	) {
+		res.status(400).json({ error: "Patient details are missing or invalid." });
+		return;
+	}
+
+	try {
+		res.status(201).json({ patient: await savePatient(patient) });
+	} catch (error) {
+		console.error("Could not save patient:", error);
+		res.status(500).json({ error: "Could not save patient." });
+	}
+});
+
+app.get("/api/referrals", async (req, res) => {
+	try {
+		res.json(await getReferrals());
+	} catch (error) {
+		console.error("Could not retrieve referrals:", error);
+		res.status(500).json({ error: "Could not retrieve referrals." });
+	}
+});
+
+async function sendToWebsite2(structuredData) 
+{
+    if (isDevMode())
+    {
+        console.log('--------------------------------------------------');
+        console.log('[DEV_MODE ACTIVE] Skipping remote request to Website 2.');
+        console.log('Parsed Data:');
+        console.dir(structuredData, { depth: null });
+        console.log('--------------------------------------------------');
+    
+        return {
+            status: 'MOCK_SUCCESS',
+            message: 'Data logged locally in DEV_MODE.',
+            timestamp: new Date().toISOString()
+        };
+    }
+
+    // PRODUCTION: Real request to Website 2
+    const website2Response = await fetch('https://website2.com/api/receive-endpoint', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'Authorization': 'Bearer YOUR_WEBSITE_2_API_KEY'
+        },
+        body: JSON.stringify({
+            source: 'Website 1 Pipeline',
+            timestamp: new Date().toISOString(),
+            data: structuredData
+        })
+    });
+
+    if (!website2Response.ok) {
+        throw new Error(`Website 2 rejected payload with status ${website2Response.status}`);
+    }
+
+    return await website2Response.json();
+}
+
 // Endpoint to receive file from Website 1
 app.post("/api/process-file", upload.single("file"), async (req, res) => {
 	try {
@@ -147,6 +248,13 @@ app.post("/api/process-file", upload.single("file"), async (req, res) => {
 		//const structuredData = parseStructuredText(fileText);
 		const structuredData = bookingData;
 
+		if (
+			typeof structuredData.referralId !== "string" ||
+			!structuredData.referralId
+		) {
+			structuredData.referralId = `IMG-${randomUUID()}`;
+		}
+
 		// 2. Verify Data is accurate
 		const verified = await Verify(structuredData);
 		if (!verified.decision) {
@@ -158,20 +266,26 @@ app.post("/api/process-file", upload.single("file"), async (req, res) => {
 			return;
 		}
 
+		const referralRecordId = await saveReferral(structuredData);
 		const crisRequest = toCrisRequest(structuredData);
 		const requests = readStoredRequests();
-		const existingRequest = requests.find(
+		const existingRequestIndex = requests.findIndex(
 			(request) => request.id === crisRequest.id,
 		);
-		if (!existingRequest) {
+		if (existingRequestIndex === -1) {
 			requests.push(crisRequest);
-			writeStoredRequests(requests);
+		} else {
+			crisRequest.status = requests[existingRequestIndex].status;
+			requests[existingRequestIndex] = crisRequest;
 		}
+		writeStoredRequests(requests);
 
 		res.status(200).json({
 			success: true,
 			message: "Referral added to the CRIS worklist.",
-			request: existingRequest || crisRequest,
+			referralId: structuredData.referralId,
+			referralRecordId,
+			request: crisRequest,
 		});
 	} catch (error) {
 		console.error("Processing error:", error);
@@ -201,9 +315,18 @@ process.on("exit", removePidFile);
 for (const signal of ["SIGINT", "SIGTERM"]) {
 	process.once(signal, () => {
 		console.log(`Received ${signal}; shutting down Medically API...`);
-		server.close((error) => {
+		server.close(async (error) => {
 			if (error) {
 				console.error("Could not close the Medically API server:", error);
+				process.exitCode = 1;
+			}
+			try {
+				await closeDatabase();
+			} catch (databaseError) {
+				console.error(
+					"Could not close the MariaDB connection pool:",
+					databaseError,
+				);
 				process.exitCode = 1;
 			}
 			removePidFile();

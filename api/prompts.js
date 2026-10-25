@@ -51,7 +51,7 @@ export async function decision_prompt(context, instructions, criteria_true, crit
 						method: 'POST',
 						headers: { 'Content-Type': 'application/json' },
 						body: JSON.stringify({
-						model: 'd3:latest',
+						model: 'd3:2b',
 						state: context,
 						questions: {
 								verify: {
