@@ -53,6 +53,12 @@ existing patient records.
 Run `Scripts/setup.bat` from the `Scripts` directory to use the existing
 Windows setup flow.
 
+From the project root, run `npm start` to start both servers. The app and its
+patient/referral APIs are available at `http://localhost:3000`; the
+`POST /api/process-file` endpoint is available at `http://localhost:3030`.
+Use `npm stop` to stop both servers. To run them separately, use
+`npm run start:web` and `npm run start:process`.
+
 ## Shared deployment for multiple devices
 
 This project is designed so the AI model runs in one shared backend, not on every
@@ -63,7 +69,9 @@ user's laptop. The backend reads the model endpoint from `OLLAMA_HOST`.
 
    ```env
    DEV_MODE=false
-   PORT=3000
+   API_PORT=3030
+   WEB_PORT=3000
+   NHS_SERVER_URL=http://10.0.0.12:3000
    OLLAMA_HOST=http://10.0.0.12:11434
    ```
 
@@ -77,16 +85,31 @@ user's laptop. The backend reads the model endpoint from `OLLAMA_HOST`.
 4. Start the API on that server:
 
    ```sh
-   node api/server.js
+   npm start
    ```
 
-5. Everyone else should open the app through that server URL, for example:
+   This starts two servers: the Imaging Desk/CRIS website and its data APIs
+   on port `3000`, and the referral processing API on port `3030`. The
+   process API forwards verified referrals to the NHS server's
+   `POST /api/referrals/receive` endpoint, where they are saved to the
+   database and CRIS worklist. Set `WEB_PORT` or `API_PORT` to change the
+   ports.
+
+5. Everyone else should open the app through the web server, for example:
 
    ```text
-   http://10.0.0.12:3000/imaging-desk
+   http://10.0.0.12:3000/imaging-desk?apiBaseUrl=http://10.0.0.12:3030
    ```
 
 This means one AI service handles all referrals, so no one has to install Ollama on their own device.
+For a non-local deployment, set `WEB_ORIGIN` in `.env` to the web server
+origin (for example, `http://10.0.0.12:3000`) so the process API permits
+requests from the app.
+
+To run only one server, use `npm run start:web` for the app and its patient /
+referral APIs and the receiving endpoint, or `npm run start:process` for
+`POST /api/process-file`.
+Run `npm stop` to stop both servers.
 
 ## API reference
 
@@ -172,14 +195,14 @@ Required fields for a valid submission:
 Upload a JSON file:
 
 ```sh
-curl -X POST http://localhost:3000/api/process-file \
+curl -X POST http://localhost:3030/api/process-file \
   -F "file=@referral.json"
 ```
 
 Send raw JSON directly:
 
 ```sh
-curl -X POST http://localhost:3000/api/process-file \
+curl -X POST http://localhost:3030/api/process-file \
   -H "Content-Type: application/json" \
   --data @referral.json
 ```

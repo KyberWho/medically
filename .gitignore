@@ -5,7 +5,7 @@ __pycache__/
 # Files
 .editorconfig
 .env
-.medically-api.pid
+*.pid
 .data/
 
 node_modules

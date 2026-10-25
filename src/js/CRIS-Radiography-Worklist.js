@@ -18,11 +18,6 @@ const apiBaseUrl = (() => {
 		new URLSearchParams(window.location.search).get("apiBaseUrl") ||
 		new URLSearchParams(window.location.search).get("api");
 	if (explicit) return explicit.replace(/\/$/, "");
-	if (["localhost", "127.0.0.1"].includes(window.location.hostname)) {
-		if (window.location.port && window.location.port !== "3000")
-			return "http://localhost:3000";
-		return window.location.origin;
-	}
 	return window.location.origin;
 })();
 const apiUrl = (path) => `${apiBaseUrl}${path.startsWith("/") ? path : `/${path}`}`;

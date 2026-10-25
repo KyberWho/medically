@@ -1,56 +1,32 @@
 import cors from "cors";
 import { randomUUID } from "node:crypto";
-import {
-	existsSync,
-	mkdirSync,
-	readFileSync,
-	renameSync,
-	rmSync,
-	writeFileSync,
-} from "node:fs";
+import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import express from "express";
 import multer from "multer";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import {
-	closeDatabase,
-	getPatients,
-	getReferrals,
-	savePatient,
-	saveReferral,
-} from "./database.js";
-import { isDevMode } from "./utilities.js";
+import "./utilities.js";
 import { Verify } from "./verify.js";
 
 const app = express();
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.API_PORT || 3030;
 const pidFile = path.resolve(
 	path.dirname(fileURLToPath(import.meta.url)),
 	"..",
-	".medically-api.pid",
+	".medically-process-api.pid",
 );
-const sourceDirectory = path.resolve(
-	path.dirname(fileURLToPath(import.meta.url)),
-	"..",
-	"src",
-);
-const htmlDirectory = path.join(sourceDirectory, "html");
-const requestStoreFile = path.resolve(
-	path.dirname(fileURLToPath(import.meta.url)),
-	"..",
-	".data",
-	"cris-requests.json",
-);
-
 app.use(express.json());
 
+const webPort = process.env.WEB_PORT || 3000;
 app.use(
 	cors({
 		origin: (origin, callback) => {
 			const allowedOrigins = new Set([
 				"http://localhost:3000",
 				"http://127.0.0.1:3000",
+				`http://localhost:${webPort}`,
+				`http://127.0.0.1:${webPort}`,
 				"http://localhost:5500",
 				"http://127.0.0.1:5500",
 				"http://localhost:5173",
@@ -65,7 +41,11 @@ app.use(
 			} else if (
 				/^https?:\/\/(localhost|127\.0\.0\.1):(3000|5500|5173|4173|8080)$/.test(
 					origin,
-				)
+				) ||
+				(process.env.WEB_ORIGIN || "")
+					.split(",")
+					.map((allowedOrigin) => allowedOrigin.trim())
+					.includes(origin)
 			) {
 				callback(null, true);
 			} else {
@@ -77,124 +57,14 @@ app.use(
 	}),
 );
 
-app.use(express.static(sourceDirectory));
-app.get("/imaging-desk", (req, res) => {
-	res.sendFile(path.join(htmlDirectory, "Imaging-Desk.html"));
-});
-app.get("/cris", (req, res) => {
-	res.sendFile(path.join(htmlDirectory, "CRIS-Radiography-Worklist.html"));
-});
-app.get("/api/cris/requests", (req, res) => {
-	try {
-		res.json({ requests: readStoredRequests() });
-	} catch (error) {
-		res.status(500).json({ success: false, error: error.message });
-	}
-});
-
-function readStoredRequests() {
-	if (!existsSync(requestStoreFile)) return [];
-	const requests = JSON.parse(readFileSync(requestStoreFile, "utf8"));
-	if (!Array.isArray(requests)) {
-		throw new Error("The CRIS request store must contain a JSON array.");
-	}
-	return requests;
-}
-
-function writeStoredRequests(requests) {
-	const directory = path.dirname(requestStoreFile);
-	const temporaryFile = `${requestStoreFile}.${process.pid}.tmp`;
-	mkdirSync(directory, { recursive: true });
-	writeFileSync(temporaryFile, JSON.stringify(requests, null, 2));
-	renameSync(temporaryFile, requestStoreFile);
-}
-
-function toCrisRequest(data) {
-	const referral = data.referral || {};
-	const receivedAt = Date.parse(data.exportedAt);
-	return {
-		id: data.referralId || `REQ-${randomUUID()}`,
-		status: "New",
-		receivedAt: Number.isNaN(receivedAt)
-			? new Date().toISOString()
-			: new Date(receivedAt).toISOString(),
-		patient: data.patient,
-		referrer: data.referrer,
-		referral: {
-			hospitalDepartment: referral.hospitalDepartment || "",
-			modality: referral.modality || "",
-			area: referral.area || "",
-			clinicalDetails: referral.clinicalDetails || "",
-			severity: referral.severity || "Routine",
-		},
-	};
-}
-
 const upload = multer({ storage: multer.memoryStorage() });
-
-app.get("/api/patients", async (req, res) => {
-	try {
-		res.json(await getPatients());
-	} catch (error) {
-		console.error("Could not retrieve patients:", error);
-		res.status(500).json({ error: "Could not retrieve patients." });
-	}
-});
-
-app.post("/api/patients", async (req, res) => {
-	const patient = req.body;
-	if (
-		!patient ||
-		typeof patient.name !== "string" ||
-		!patient.name.trim() ||
-		typeof patient.nhsNumber !== "string" ||
-		!/^\d{10}$/.test(patient.nhsNumber.replace(/\s/g, "")) ||
-		typeof patient.dob !== "string" ||
-		(patient.dob && !/^\d{4}-\d{2}-\d{2}$/.test(patient.dob)) ||
-		typeof patient.address !== "string" ||
-		typeof patient.gender !== "string" ||
-		typeof patient.mobilePhone !== "string"
-	) {
-		res.status(400).json({ error: "Patient details are missing or invalid." });
-		return;
-	}
-
-	try {
-		res.status(201).json({ patient: await savePatient(patient) });
-	} catch (error) {
-		console.error("Could not save patient:", error);
-		res.status(500).json({ error: "Could not save patient." });
-	}
-});
-
-app.get("/api/referrals", async (req, res) => {
-	try {
-		res.json(await getReferrals());
-	} catch (error) {
-		console.error("Could not retrieve referrals:", error);
-		res.status(500).json({ error: "Could not retrieve referrals." });
-	}
-});
 
 async function sendToWebsite2(structuredData) 
 {
-    if (isDevMode())
-    {
-        console.log('--------------------------------------------------');
-        console.log('[DEV_MODE ACTIVE] Skipping remote request to Website 2.');
-        console.log('Parsed Data:');
-        console.dir(structuredData, { depth: null });
-        console.log('--------------------------------------------------');
-    
-        return {
-            status: 'MOCK_SUCCESS',
-            message: 'Data logged locally in DEV_MODE.',
-            timestamp: new Date().toISOString()
-        };
-    }
-
-    // PRODUCTION: Real request to Website 2
-    const website2Response = await fetch('https://website2.com/api/receive-endpoint', {
+    const website2Url = (
+        process.env.NHS_SERVER_URL || `http://localhost:${webPort}`
+    ).replace(/\/$/, "");
+    const website2Response = await fetch(`${website2Url}/api/referrals/receive`, {
         method: 'POST',
         headers: {
             'Content-Type': 'application/json',
@@ -208,7 +78,11 @@ async function sendToWebsite2(structuredData)
     });
 
     if (!website2Response.ok) {
-        throw new Error(`Website 2 rejected payload with status ${website2Response.status}`);
+        const error = new Error(
+            `NHS server rejected the referral with status ${website2Response.status}.`,
+        );
+        error.statusCode = 502;
+        throw error;
     }
 
     return await website2Response.json();
@@ -266,30 +140,11 @@ app.post("/api/process-file", upload.single("file"), async (req, res) => {
 			return;
 		}
 
-		const referralRecordId = await saveReferral(structuredData);
-		const crisRequest = toCrisRequest(structuredData);
-		const requests = readStoredRequests();
-		const existingRequestIndex = requests.findIndex(
-			(request) => request.id === crisRequest.id,
-		);
-		if (existingRequestIndex === -1) {
-			requests.push(crisRequest);
-		} else {
-			crisRequest.status = requests[existingRequestIndex].status;
-			requests[existingRequestIndex] = crisRequest;
-		}
-		writeStoredRequests(requests);
-
-		res.status(200).json({
-			success: true,
-			message: "Referral added to the CRIS worklist.",
-			referralId: structuredData.referralId,
-			referralRecordId,
-			request: crisRequest,
-		});
+		const result = await sendToWebsite2(structuredData);
+		res.status(200).json(result);
 	} catch (error) {
 		console.error("Processing error:", error);
-		res.status(500).json({
+		res.status(error.statusCode || 500).json({
 			success: false,
 			error: error.message,
 		});
@@ -315,18 +170,9 @@ process.on("exit", removePidFile);
 for (const signal of ["SIGINT", "SIGTERM"]) {
 	process.once(signal, () => {
 		console.log(`Received ${signal}; shutting down Medically API...`);
-		server.close(async (error) => {
+		server.close((error) => {
 			if (error) {
 				console.error("Could not close the Medically API server:", error);
-				process.exitCode = 1;
-			}
-			try {
-				await closeDatabase();
-			} catch (databaseError) {
-				console.error(
-					"Could not close the MariaDB connection pool:",
-					databaseError,
-				);
 				process.exitCode = 1;
 			}
 			removePidFile();
