@@ -87,3 +87,140 @@ user's laptop. The backend reads the model endpoint from `OLLAMA_HOST`.
    ```
 
 This means one AI service handles all referrals, so no one has to install Ollama on their own device.
+
+## API reference
+
+### POST /api/process-file
+
+The only endpoint needed to integrate existing systems with the medically 
+validation checker is the /api/process-file POST request.
+
+Processes a referral payload, validates that the referral is clinically
+consistent with the booking and consultation notes, then forwards the 
+request .
+
+This endpoint accepts either:
+
+- a multipart upload with a form field named `file` that contains JSON, or
+- a raw JSON request body sent with `Content-Type: application/json`.
+
+The JSON payload is expected to include the same structure used by the Imaging
+Desk front end, typically with these top-level sections:
+
+```json
+{
+  "referralId": "IMG-123",
+  "exportedAt": "2026-10-25T09:00:00.000Z",
+  "patient": {
+    "name": "Jane Doe",
+    "nhsNumber": "1234567890",
+    "dob": "1984-06-15",
+    "address": "12 Example Street",
+    "gender": "Female",
+    "mobilePhone": "07700 900123"
+  },
+  "referrer": {
+    "user": "Dr Smith",
+    "contactNo": "020 7946 0958",
+    "requestingClinician": "Dr Smith",
+    "location": "Hillview Surgery",
+    "category": "General practice"
+  },
+  "referral": {
+    "hospitalDepartment": "Orthopaedics",
+    "modality": "X-ray",
+    "area": "Left wrist",
+    "clinicalDetails": "Pain and swelling after a fall on outstretched hand.",
+    "severity": "Urgent"
+  },
+  "booking": {
+    "appointmentDate": "2026-10-29",
+    "appointmentTime": "09:15",
+    "appointmentType": "Face-to-face",
+    "location": "Main clinic",
+    "clinician": "Dr Jones",
+    "status": "Booked",
+    "reason": "Left wrist pain and swelling after FOOSH"
+  },
+  "consultation": {
+    "presentingComplaint": "Left wrist pain",
+    "history": "Patient fell while walking and landed on the left hand.",
+    "examination": "Swollen left wrist with reduced range of movement.",
+    "assessment": "Probable wrist sprain",
+    "plan": "Arrange wrist X-ray",
+    "additionalNotes": "Pain is worse with movement."
+  }
+}
+```
+
+Mandatory clinical checks performed by this endpoint:
+
+- `referral.area` and `referral.clinicalDetails` are compared with the booking
+  reason and consultation notes.
+- If the model decides the referral is clinically inconsistent, the request is
+  rejected with a `406` response rather than saved to the database.
+
+Required fields for a valid submission:
+
+- `referral.area`
+- `referral.clinicalDetails`
+- `booking.reason`
+- `consultation.presentingComplaint`
+
+#### Example cURL
+
+Upload a JSON file:
+
+```sh
+curl -X POST http://localhost:3000/api/process-file \
+  -F "file=@referral.json"
+```
+
+Send raw JSON directly:
+
+```sh
+curl -X POST http://localhost:3000/api/process-file \
+  -H "Content-Type: application/json" \
+  --data @referral.json
+```
+
+#### Success response
+
+```json
+{
+  "success": true,
+  "message": "Referral added to the CRIS worklist.",
+  "referralId": "IMG-123",
+  "referralRecordId": 42,
+  "request": {
+    "id": "IMG-123",
+    "status": "New",
+    "receivedAt": "2026-10-25T09:00:00.000Z",
+    "patient": { "name": "Jane Doe" },
+    "referrer": { "user": "Dr Smith" },
+    "referral": {
+      "hospitalDepartment": "Orthopaedics",
+      "modality": "X-ray",
+      "area": "Left wrist",
+      "clinicalDetails": "Pain and swelling after a fall on outstretched hand.",
+      "severity": "Urgent"
+    }
+  }
+}
+```
+
+#### Error responses
+
+- `400 Bad Request` when the upload is missing, empty, or not valid JSON.
+- `406 Not Acceptable` when the referral fails the clinical verification step.
+- `500 Internal Server Error` for other server-side storage or processing errors.
+
+Example validation rejection:
+
+```json
+{
+  "success": false,
+  "error": "Referral notes are not suitable.",
+  "message": "• Left wrist pain does not match the booking reason for chest pain."
+}
+```
