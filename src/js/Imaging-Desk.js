@@ -484,7 +484,7 @@ async function submitReferral(skipverify = false) {
 		save();
 		const submission = {
 			...payload(),
-			...(skipverify ? { skipverify: true } : {}),
+			...(skipverify ? { skipverify: true, overrideReview: true } : {}),
 		};
 		const response = await fetch(apiUrl("/api/process-file"), {
 			method: "POST",

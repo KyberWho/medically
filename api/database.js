@@ -1,13 +1,121 @@
 import mysql from 'mysql2/promise';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import { getEnv } from './utilities.js';
 
+const fallbackDirectory = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '.data');
+const fallbackReferralsFile = path.join(fallbackDirectory, 'referrals.json');
+const fallbackPatientsFile = path.join(fallbackDirectory, 'patients.json');
+const pendingReferralsFile = path.join(fallbackDirectory, 'pending-referrals.json');
+const pendingPatientsFile = path.join(fallbackDirectory, 'pending-patients.json');
+
+function ensureFallbackStore(filePath) {
+    mkdirSync(path.dirname(filePath), { recursive: true });
+    if (!existsSync(filePath)) {
+        writeFileSync(filePath, '[]', 'utf8');
+    }
+}
+
+function readFallbackRecords(filePath) {
+    ensureFallbackStore(filePath);
+    try {
+        const content = readFileSync(filePath, 'utf8').trim();
+        if (!content) return [];
+        const parsed = JSON.parse(content);
+        return Array.isArray(parsed) ? parsed : [];
+    } catch (error) {
+        console.warn(`Unable to read fallback store at ${filePath}: ${error.message}`);
+        return [];
+    }
+}
+
+function writeFallbackRecords(filePath, records) {
+    ensureFallbackStore(filePath);
+    writeFileSync(filePath, JSON.stringify(records, null, 2), 'utf8');
+}
+
+async function isDatabaseAvailable() {
+    try {
+        await pool.query('SELECT 1');
+        return true;
+    } catch (error) {
+        return false;
+    }
+}
+
+async function withRetry(operation, retries = 3) {
+    let lastError;
+    for (let attempt = 0; attempt < retries; attempt += 1) {
+        try {
+            return await operation();
+        } catch (error) {
+            lastError = error;
+            if (attempt < retries - 1) {
+                await new Promise((resolve) => setTimeout(resolve, 250 * (attempt + 1)));
+                continue;
+            }
+        }
+    }
+    throw lastError;
+}
+
+async function flushPendingReferrals() {
+    if (!(await isDatabaseAvailable())) return;
+    const pending = readFallbackRecords(pendingReferralsFile);
+    if (!pending.length) return;
+
+    const remaining = [];
+    for (const entry of pending) {
+        try {
+            await saveReferralInternal(entry.data);
+        } catch (error) {
+            remaining.push(entry);
+            console.warn(`Retry queued referral failed: ${error.message}`);
+        }
+    }
+
+    writeFallbackRecords(pendingReferralsFile, remaining);
+}
+
+async function flushPendingPatients() {
+    if (!(await isDatabaseAvailable())) return;
+    const pending = readFallbackRecords(pendingPatientsFile);
+    if (!pending.length) return;
+
+    const remaining = [];
+    for (const entry of pending) {
+        try {
+            await savePatientInternal(entry.data);
+        } catch (error) {
+            remaining.push(entry);
+            console.warn(`Retry queued patient failed: ${error.message}`);
+        }
+    }
+
+    writeFallbackRecords(pendingPatientsFile, remaining);
+}
+
+void flushPendingReferrals();
+void flushPendingPatients();
+
+const missingConfig = ['DB_HOST', 'DB_USER', 'DB_PASSWORD', 'DB_NAME']
+    .filter((key) => !getEnv(key, '').trim());
+
+if (missingConfig.length) {
+    console.warn(
+        `MariaDB configuration is incomplete: ${missingConfig.join(', ')}. ` +
+        'Copy tests/.env.example to .env and set the DB_* values before running the API.'
+    );
+}
+
 const pool = mysql.createPool({
-    host: getEnv('DB_HOST'),
+    host: getEnv('DB_HOST', 'localhost'),
     port: Number(getEnv('DB_PORT', '3306')),
-    user: getEnv('DB_USER'),
-    password: getEnv('DB_PASSWORD'),
-    database: getEnv('DB_NAME'),
+    user: getEnv('DB_USER', 'medically'),
+    password: getEnv('DB_PASSWORD', 'medically'),
+    database: getEnv('DB_NAME', 'medically'),
     timezone: 'Z',
     dateStrings: true,
     waitForConnections: true,
@@ -145,7 +253,7 @@ function referralDataFromRow(row) {
     };
 }
 
-export async function saveReferral(data) {
+async function saveReferralInternal(data) {
     const values = referralColumns(data);
     const columns = Object.keys(values);
     const parameters = Object.values(values);
@@ -193,51 +301,7 @@ export async function saveReferral(data) {
     }
 }
 
-export async function getReferrals() {
-    const [rows] = await pool.execute(
-        `SELECT r.*,
-                COALESCE(NULLIF(r.patient_name, ''), p.name) AS resolved_patient_name,
-                COALESCE(r.patient_dob, p.dob) AS resolved_patient_dob,
-                COALESCE(NULLIF(r.patient_address, ''), p.address) AS resolved_patient_address,
-                COALESCE(NULLIF(r.patient_nhs_number, ''), p.nhs_number) AS resolved_patient_nhs_number,
-                COALESCE(NULLIF(r.patient_gender, ''), p.gender) AS resolved_patient_gender,
-                COALESCE(NULLIF(r.patient_mobile_phone, ''), p.mobile_phone) AS resolved_patient_mobile_phone
-         FROM referrals AS r
-         LEFT JOIN patients AS p ON p.patient_id = r.patient_id
-         ORDER BY r.created_at DESC, r.referral_record_id DESC`
-    );
-    return rows.map((row) => ({
-        referralRecordId: row.referral_record_id,
-        referralId: row.referral_id,
-        exportedAt: row.exported_at,
-        submittedAt: row.created_at,
-        data: referralDataFromRow(row)
-    }));
-}
-
-export async function closeDatabase() {
-    await pool.end();
-}
-
-export async function getPatients() {
-    const [rows] = await pool.execute(
-        `SELECT patient_id, name, dob, address, nhs_number, gender, mobile_phone
-         FROM patients
-         ORDER BY name, patient_id`
-    );
-
-    return rows.map((row) => ({
-        id: String(row.patient_id),
-        name: row.name ?? '',
-        dob: row.dob ?? '',
-        address: row.address ?? '',
-        nhsNumber: row.nhs_number,
-        gender: row.gender ?? '',
-        mobilePhone: row.mobile_phone ?? ''
-    }));
-}
-
-export async function savePatient(patient) {
+async function savePatientInternal(patient) {
     const nhsNumber = patient.nhsNumber.replace(/\s/g, '');
     const [result] = await pool.execute(
         `INSERT INTO patients (name, dob, address, nhs_number, gender, mobile_phone)
@@ -281,4 +345,119 @@ export async function savePatient(patient) {
         gender: row.gender ?? '',
         mobilePhone: row.mobile_phone ?? ''
     };
+}
+
+export async function saveReferral(data) {
+    try {
+        const recordId = await withRetry(async () => saveReferralInternal(data));
+        await flushPendingReferrals();
+        return recordId;
+    } catch (error) {
+        const fileRecords = readFallbackRecords(pendingReferralsFile);
+        const queuedRecord = {
+            id: fileRecords.length ? Math.max(...fileRecords.map((record) => Number(record.id) || 0)) + 1 : 1,
+            createdAt: new Date().toISOString(),
+            data,
+        };
+        fileRecords.push(queuedRecord);
+        writeFallbackRecords(pendingReferralsFile, fileRecords);
+        console.warn(`MariaDB save failed; queued referral for retry: ${error.message}`);
+        return queuedRecord.id;
+    }
+}
+
+export async function getReferrals() {
+    try {
+        const [rows] = await pool.execute(
+            `SELECT r.*,
+                    COALESCE(NULLIF(r.patient_name, ''), p.name) AS resolved_patient_name,
+                    COALESCE(r.patient_dob, p.dob) AS resolved_patient_dob,
+                    COALESCE(NULLIF(r.patient_address, ''), p.address) AS resolved_patient_address,
+                    COALESCE(NULLIF(r.patient_nhs_number, ''), p.nhs_number) AS resolved_patient_nhs_number,
+                    COALESCE(NULLIF(r.patient_gender, ''), p.gender) AS resolved_patient_gender,
+                    COALESCE(NULLIF(r.patient_mobile_phone, ''), p.mobile_phone) AS resolved_patient_mobile_phone
+             FROM referrals AS r
+             LEFT JOIN patients AS p ON p.patient_id = r.patient_id
+             ORDER BY r.created_at DESC, r.referral_record_id DESC`
+        );
+        return rows.map((row) => ({
+            referralRecordId: row.referral_record_id,
+            referralId: row.referral_id,
+            exportedAt: row.exported_at,
+            submittedAt: row.created_at,
+            data: referralDataFromRow(row)
+        }));
+    } catch (error) {
+        console.warn(`MariaDB read failed; using fallback file store instead: ${error.message}`);
+        return readFallbackRecords(fallbackReferralsFile).map((row) => ({
+            referralRecordId: row.referralRecordId,
+            referralId: row.referralId,
+            exportedAt: row.exportedAt,
+            submittedAt: row.submittedAt,
+            data: row.data
+        }));
+    }
+}
+
+export async function closeDatabase() {
+    await pool.end();
+}
+
+export async function getPatients() {
+    try {
+        const [rows] = await pool.execute(
+            `SELECT patient_id, name, dob, address, nhs_number, gender, mobile_phone
+             FROM patients
+             ORDER BY name, patient_id`
+        );
+
+        return rows.map((row) => ({
+            id: String(row.patient_id),
+            name: row.name ?? '',
+            dob: row.dob ?? '',
+            address: row.address ?? '',
+            nhsNumber: row.nhs_number,
+            gender: row.gender ?? '',
+            mobilePhone: row.mobile_phone ?? ''
+        }));
+    } catch (error) {
+        console.warn(`MariaDB patient read failed; using fallback patient store instead: ${error.message}`);
+        return readFallbackRecords(fallbackPatientsFile).map((row) => ({
+            id: String(row.id),
+            name: row.name ?? '',
+            dob: row.dob ?? '',
+            address: row.address ?? '',
+            nhsNumber: row.nhsNumber,
+            gender: row.gender ?? '',
+            mobilePhone: row.mobilePhone ?? ''
+        }));
+    }
+}
+
+export async function savePatient(patient) {
+    const nhsNumber = patient.nhsNumber.replace(/\s/g, '');
+    try {
+        const savedPatient = await withRetry(async () => savePatientInternal(patient));
+        await flushPendingPatients();
+        return savedPatient;
+    } catch (error) {
+        const patients = readFallbackRecords(pendingPatientsFile);
+        const existing = patients.find((entry) => (entry.data?.nhsNumber || entry.nhsNumber || '').replace(/\s/g, '') === nhsNumber);
+        const queuedPatient = {
+            id: existing?.id ?? String(Date.now()),
+            data: {
+                id: existing?.id ?? String(Date.now()),
+                name: patient.name ?? '',
+                dob: patient.dob ?? '',
+                address: patient.address ?? '',
+                nhsNumber,
+                gender: patient.gender ?? '',
+                mobilePhone: patient.mobilePhone ?? ''
+            }
+        };
+        const nextPatients = existing ? patients.map((entry) => (entry.id === queuedPatient.id ? queuedPatient : entry)) : [...patients, queuedPatient];
+        writeFallbackRecords(pendingPatientsFile, nextPatients);
+        console.warn(`MariaDB patient save failed; queued patient for retry: ${error.message}`);
+        return queuedPatient.data;
+    }
 }

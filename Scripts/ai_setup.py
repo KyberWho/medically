@@ -92,7 +92,6 @@ def pull_and_install_ollama():
     try:
         install_ollama()
         pull_model("qwen3:1.7b")
-        pull_model("d3:2b")
         print("Ollama's local API is available at http://localhost:11434.")
     except subprocess.CalledProcessError as error:
         raise SystemExit(

@@ -25,6 +25,23 @@ import { Verify } from "./verify.js";
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+const serveFrontend = process.env.SERVE_FRONTEND !== "false";
+const defaultAllowedOrigins = [
+	"http://localhost:3000",
+	"http://127.0.0.1:3000",
+	"http://localhost:5500",
+	"http://127.0.0.1:5500",
+	"http://localhost:5173",
+	"http://127.0.0.1:5173",
+	"http://localhost:4173",
+	"http://127.0.0.1:4173",
+	"http://localhost:8080",
+	"http://127.0.0.1:8080",
+];
+const configuredAllowedOrigins = (process.env.CORS_ALLOWED_ORIGINS || "")
+	.split(",")
+	.map((origin) => origin.trim())
+	.filter(Boolean);
 const pidFile = path.resolve(
 	path.dirname(fileURLToPath(import.meta.url)),
 	"..",
@@ -49,41 +66,46 @@ app.use(
 	cors({
 		origin: (origin, callback) => {
 			const allowedOrigins = new Set([
-				"http://localhost:3000",
-				"http://127.0.0.1:3000",
-				"http://localhost:5500",
-				"http://127.0.0.1:5500",
-				"http://localhost:5173",
-				"http://127.0.0.1:5173",
-				"http://localhost:4173",
-				"http://127.0.0.1:4173",
-				"http://localhost:8080",
-				"http://127.0.0.1:8080",
+				...defaultAllowedOrigins,
+				...configuredAllowedOrigins,
 			]);
 			if (!origin || allowedOrigins.has(origin)) {
 				callback(null, true);
-			} else if (
+				return;
+			}
+			if (
 				/^https?:\/\/(localhost|127\.0\.0\.1):(3000|5500|5173|4173|8080)$/.test(
 					origin,
 				)
 			) {
 				callback(null, true);
-			} else {
-				callback(new Error("Origin not allowed by CORS"));
+				return;
 			}
+			callback(new Error("Origin not allowed by CORS"));
 		},
 		methods: ["POST", "GET", "OPTIONS"],
 		allowedHeaders: ["Content-Type", "x-api-key"],
 	}),
 );
 
-app.use(express.static(sourceDirectory));
-app.get("/imaging-desk", (req, res) => {
-	res.sendFile(path.join(htmlDirectory, "Imaging-Desk.html"));
+if (serveFrontend) {
+	app.use(express.static(sourceDirectory));
+	app.get("/imaging-desk", (req, res) => {
+		res.sendFile(path.join(htmlDirectory, "Imaging-Desk.html"));
+	});
+	app.get("/cris", (req, res) => {
+		res.sendFile(path.join(htmlDirectory, "CRIS-Radiography-Worklist.html"));
+	});
+}
+
+app.get("/health", (req, res) => {
+	res.json({
+		status: "ok",
+		service: "medically-api",
+		serveFrontend,
+	});
 });
-app.get("/cris", (req, res) => {
-	res.sendFile(path.join(htmlDirectory, "CRIS-Radiography-Worklist.html"));
-});
+
 app.get("/api/cris/requests", (req, res) => {
 	try {
 		res.json({ requests: readStoredRequests() });
@@ -176,6 +198,7 @@ app.get("/api/referrals", async (req, res) => {
 	}
 });
 
+// Endpoint to receive structured data from Website 1 and send it to Website 2 (for development purposes)
 async function sendToWebsite2(structuredData) 
 {
     if (isDevMode())
@@ -255,9 +278,19 @@ app.post("/api/process-file", upload.single("file"), async (req, res) => {
 			structuredData.referralId = `IMG-${randomUUID()}`;
 		}
 
+		const manualOverride = structuredData.skipverify === true && structuredData.overrideReview === true;
+		if (structuredData.skipverify === true && !manualOverride) {
+			res.status(403).json({
+				success: false,
+				error: "Verification overrides are disabled.",
+				message: "A clinician must explicitly confirm the mismatch before the referral can be submitted.",
+			});
+			return;
+		}
+
 		// 2. Verify Data is accurate
 		const verified = await Verify(structuredData);
-		if (!verified.decision) {
+		if (!verified.decision && !manualOverride) {
 			res.status(406).json({
 				success: false,
 				error: "Referral notes are not suitable.",

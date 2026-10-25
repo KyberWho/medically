@@ -53,6 +53,47 @@ existing patient records.
 Run `Scripts/setup.bat` from the `Scripts` directory to use the existing
 Windows setup flow.
 
+## Decoupled frontend and API deployment
+
+The API and the demo websites can be run as separate services. The API exposes
+JSON endpoints such as `/api/patients`, `/api/referrals`, and
+`/api/process-file`, while the browser UI can live on a different origin.
+
+To disable the built-in static site hosting and run only the API:
+
+```env
+SERVE_FRONTEND=false
+PORT=3000
+CORS_ALLOWED_ORIGINS=https://app.example.com,https://imaging.example.com
+```
+
+Then start the API server with:
+
+```sh
+node api/server.js
+```
+
+On the frontend, point the browser at the API origin explicitly:
+
+```html
+<script>
+  window.API_BASE_URL = "https://api.example.com";
+</script>
+```
+
+The demo JavaScript already reads `window.API_BASE_URL`, a query param such as
+`?apiBaseUrl=https://api.example.com`, or falls back to the current origin when
+running locally.
+
+For a full split deployment, host:
+
+- `https://app.example.com` -> the website frontend
+- `https://api.example.com` -> the Medically API
+
+The frontend calls the API over HTTP, while the API does the AI verification and
+database work. This keeps the AI logic in one backend and lets multiple websites,
+apps, or devices consume the same service.
+
 ## Shared deployment for multiple devices
 
 This project is designed so the AI model runs in one shared backend, not on every
@@ -67,12 +108,13 @@ user's laptop. The backend reads the model endpoint from `OLLAMA_HOST`.
    OLLAMA_HOST=http://10.0.0.12:11434
    ```
 
-3. Install and run Ollama on the shared server, then pull the models:
+3. Install and run Ollama on the shared server, then pull the model used by the API:
 
    ```sh
-   ollama pull d3:latest
    ollama pull qwen3:1.7b
    ```
+
+   The older `d3:*` model names were a legacy configuration and are no longer required for the verification flow.
 
 4. Start the API on that server:
 
